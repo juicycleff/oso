@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -119,6 +120,11 @@ pub enum Goal {
     Bind {
         var: Symbol,
         value: Term,
+    },
+
+    /// Augment the binding stack.
+    BindBatch {
+        bindings: Rc<RefCell<BindingStack>>,
     },
 }
 
@@ -422,6 +428,10 @@ impl PolarVirtualMachine {
             }
             Goal::Unify { left, right } => self.unify(&left, &right)?,
             Goal::Bind { var, value } => self.bind(&var, value.clone()),
+            Goal::BindBatch { bindings } => bindings
+                .borrow_mut()
+                .drain(..)
+                .for_each(|Binding(var, value)| self.bind(&var, value.clone())),
             Goal::Run { runnable } => return self.run_runnable(runnable.clone_runnable()),
         }
         Ok(QueryEvent::None)
@@ -596,7 +606,7 @@ impl PolarVirtualMachine {
     }
 
     /// Return the current binding stack pointer.
-    fn bsp(&self) -> usize {
+    pub fn bsp(&self) -> usize {
         self.bindings.len()
     }
 
@@ -1394,10 +1404,16 @@ impl PolarVirtualMachine {
                 // Query in a sub-VM and invert the results.
                 assert_eq!(args.len(), 1);
                 let term = args.pop().unwrap();
-                let inverter = Box::new(Inverter::new(self, vec![Goal::Query { term }]));
+                let bindings = Rc::new(RefCell::new(BindingStack::new()));
+                let inverter = Box::new(Inverter::new(
+                    self,
+                    vec![Goal::Query { term }],
+                    bindings.clone(),
+                    self.bsp(),
+                ));
                 self.choose_conditional(
                     vec![Goal::Run { runnable: inverter }],
-                    vec![Goal::Noop],
+                    vec![Goal::BindBatch { bindings }],
                     vec![Goal::Backtrack],
                 )?;
             }
@@ -2575,12 +2591,7 @@ impl Runnable for PolarVirtualMachine {
     /// pop them off and execute them one at a time until we have a
     /// `QueryEvent` to return. May be called multiple times to restart
     /// the machine.
-    fn run(
-        &mut self,
-        _: Option<&mut BindingStack>,
-        _: Option<&mut usize>,
-        _: Option<&mut Counter>,
-    ) -> PolarResult<QueryEvent> {
+    fn run(&mut self, _: Option<&mut Counter>) -> PolarResult<QueryEvent> {
         if self.query_start_time.is_none() {
             #[cfg(not(target_arch = "wasm32"))]
             let query_start_time = Some(std::time::Instant::now());
@@ -2744,19 +2755,19 @@ mod tests {
             assert!($vm.is_halted());
         };
         ($vm:ident, [QueryEvent::Result{$result:expr}]) => {
-            assert!(matches!($vm.run(None, None, None).unwrap(), QueryEvent::Result{bindings, ..} if bindings == $result));
+            assert!(matches!($vm.run(None).unwrap(), QueryEvent::Result{bindings, ..} if bindings == $result));
             assert_query_events!($vm, []);
         };
         ($vm:ident, [QueryEvent::Result{$result:expr}, $($tail:tt)*]) => {
-            assert!(matches!($vm.run(None, None, None).unwrap(), QueryEvent::Result{bindings, ..} if bindings == $result));
+            assert!(matches!($vm.run(None).unwrap(), QueryEvent::Result{bindings, ..} if bindings == $result));
             assert_query_events!($vm, [$($tail)*]);
         };
         ($vm:ident, [$( $pattern:pat )|+ $( if $guard: expr )?]) => {
-            assert!(matches!($vm.run(None, None, None).unwrap(), $($pattern)|+ $(if $guard)?));
+            assert!(matches!($vm.run(None).unwrap(), $($pattern)|+ $(if $guard)?));
             assert_query_events!($vm, []);
         };
         ($vm:ident, [$( $pattern:pat )|+ $( if $guard: expr )?, $($tail:tt)*]) => {
-            assert!(matches!($vm.run(None, None, None).unwrap(), $($pattern)|+ $(if $guard)?));
+            assert!(matches!($vm.run(None).unwrap(), $($pattern)|+ $(if $guard)?));
             assert_query_events!($vm, [$($tail)*]);
         };
         // TODO (dhatch) Be able to use btreemap! to match on specific bindings.
@@ -2906,10 +2917,10 @@ mod tests {
         })
         .unwrap();
         assert!(
-            matches!(vm.run(None, None, None).unwrap(), QueryEvent::Result{bindings, ..} if bindings.is_empty())
+            matches!(vm.run(None).unwrap(), QueryEvent::Result{bindings, ..} if bindings.is_empty())
         );
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2921,10 +2932,10 @@ mod tests {
         })
         .unwrap();
         assert!(
-            matches!(vm.run(None, None, None).unwrap(), QueryEvent::Result{bindings, ..} if bindings.is_empty())
+            matches!(vm.run(None).unwrap(), QueryEvent::Result{bindings, ..} if bindings.is_empty())
         );
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2936,7 +2947,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2948,7 +2959,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2960,7 +2971,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2972,7 +2983,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2984,7 +2995,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -2996,7 +3007,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -3008,7 +3019,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Done { result: true }
         ));
         assert!(vm.is_halted());
@@ -3236,7 +3247,7 @@ mod tests {
             }],
         );
         assert!(matches!(
-            vm.run(None, None, None).unwrap(),
+            vm.run(None).unwrap(),
             QueryEvent::Debug { message } if &message[..] == "Hello"
         ));
     }
@@ -3248,7 +3259,7 @@ mod tests {
             false,
             vec![Goal::Halt],
         );
-        let _ = vm.run(None, None, None).unwrap();
+        let _ = vm.run(None).unwrap();
         assert_eq!(vm.goals.len(), 0);
         assert_eq!(vm.bindings.len(), 0);
     }
@@ -3269,7 +3280,7 @@ mod tests {
                 right: vals,
             }],
         );
-        let _ = vm.run(None, None, None).unwrap();
+        let _ = vm.run(None).unwrap();
         assert_eq!(vm.value(&x), Some(&Term::new_from_test(zero)));
         assert_eq!(vm.value(&y), Some(&Term::new_from_test(one)));
     }
@@ -3291,7 +3302,7 @@ mod tests {
             right: term!(y),
         }])
         .unwrap();
-        let _ = vm.run(None, None, None).unwrap();
+        let _ = vm.run(None).unwrap();
         assert_eq!(vm.value(&sym!("x")), Some(&one));
         vm.backtrack().unwrap();
 
@@ -3302,7 +3313,7 @@ mod tests {
             right: one.clone(),
         }])
         .unwrap();
-        let _ = vm.run(None, None, None).unwrap();
+        let _ = vm.run(None).unwrap();
         assert_eq!(vm.value(&z), Some(&one));
 
         // Left variable bound to value
@@ -3312,7 +3323,7 @@ mod tests {
             right: two,
         }])
         .unwrap();
-        let _ = vm.run(None, None, None).unwrap();
+        let _ = vm.run(None).unwrap();
         assert_eq!(vm.value(&z), Some(&one));
     }
 
@@ -3378,7 +3389,7 @@ mod tests {
         let mut external_isas = vec![];
 
         loop {
-            match vm.run(None, None, None).unwrap() {
+            match vm.run(None).unwrap() {
                 QueryEvent::Done { .. } => break,
                 QueryEvent::ExternalIsa {
                     call_id, class_tag, ..
@@ -3403,7 +3414,7 @@ mod tests {
 
         let mut results = vec![];
         loop {
-            match vm.run(None, None, None).unwrap() {
+            match vm.run(None).unwrap() {
                 QueryEvent::Done { .. } => break,
                 QueryEvent::ExternalIsa { .. } => (),
                 QueryEvent::Result { bindings, .. } => results.push(bindings),
@@ -3454,7 +3465,7 @@ mod tests {
 
         let mut results = Vec::new();
         loop {
-            match vm.run(None, None, None).unwrap() {
+            match vm.run(None).unwrap() {
                 QueryEvent::Done { .. } => break,
                 QueryEvent::Result { bindings, .. } => results.push(bindings),
                 QueryEvent::ExternalIsSubSpecializer {
@@ -3538,7 +3549,7 @@ mod tests {
                 right_instance_id: 1,
             })
             .unwrap();
-            let result = vm.run(None, None, None);
+            let result = vm.run(None);
             match result {
                 Ok(event) => assert!(matches!(event, QueryEvent::ExternalUnify { .. })),
                 Err(err) => {
@@ -3569,7 +3580,7 @@ mod tests {
 
         let mut vm = PolarVirtualMachine::new_test(Arc::new(RwLock::new(kb)), false, vec![]);
         vm.bind(&sym!("x"), term!(1));
-        let _ = vm.run(None, None, None);
+        let _ = vm.run(None);
         let _ = vm.next(Rc::new(query!(call!("bar", [value!([sym!("x")])]))));
         // After calling the query goal we should be left with the
         // prefiltered rules
