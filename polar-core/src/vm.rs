@@ -431,7 +431,7 @@ impl PolarVirtualMachine {
             Goal::BindBatch { bindings } => bindings
                 .borrow_mut()
                 .drain(..)
-                .for_each(|Binding(var, value)| self.bind(&var, value.clone())),
+                .for_each(|Binding(var, value)| self.bind(&var, value)),
             Goal::Run { runnable } => return self.run_runnable(runnable.clone_runnable()),
         }
         Ok(QueryEvent::None)
