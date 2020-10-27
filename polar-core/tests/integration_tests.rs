@@ -518,6 +518,14 @@ fn test_not() {
     assert!(qnull(&mut polar, "h(3)"));
 
     assert!(qeval(&mut polar, "d = {x: 1} and not d.x = 2"));
+
+    // Negate And with unbound variable.
+    polar.load_str("i(x,y) if not (y = 2 and x = 1);").unwrap();
+    assert_eq!(qvar(&mut polar, "i(2,y)", "y"), vec![value!(sym!("_y_44"))]);
+
+    // Negate Or with unbound variable.
+    polar.load_str("j(x,y) if not (y = 2 or x = 1);").unwrap();
+    assert!(qnull(&mut polar, "j(2, y)"));
 }
 
 #[test]
